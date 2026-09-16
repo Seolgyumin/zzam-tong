@@ -203,6 +203,67 @@ def extract_via_text(soup: BeautifulSoup):
     return status, name
 
 
+# 네이버 외 일반 쇼핑몰(Shopby/Cafe24/고도몰 등)에서 흔히 쓰이는
+# '구매하기' 류 버튼 영역을 찾기 위한 선택자 모음.
+BUY_BUTTON_SELECTOR = ", ".join(
+    [
+        ".purchase__btns",
+        ".purchase__button-wrap",
+        "[class*='purchase__btn']",
+        "[class*='btn-buy']",
+        "[class*='buy-btn']",
+        "[class*='btn_buy']",
+        "[class*='order-btn']",
+        "[class*='cart-btn']",
+        "[class*='soldout']",
+        "[class*='sold-out']",
+        "[class*='prd-buy']",
+    ]
+)
+
+OUT_OF_STOCK_BUTTON_TEXT = ["품절", "구매불가", "일시품절", "판매종료", "판매 종료", "SOLD OUT"]
+IN_STOCK_BUTTON_TEXT = ["구매하기", "바로구매", "바로 구매", "장바구니", "주문하기", "지금 구매", "Buy Now", "Add to Cart"]
+
+
+def extract_via_buy_button(soup: BeautifulSoup):
+    """네이버 외 일반 쇼핑몰을 위한 범용 판별 방식.
+    '구매하기'/'품절' 류 버튼의 텍스트와 비활성화(disabled) 여부로 재고 상태를 추정한다.
+    (예: pokemonstore.co.kr 같은 Shopby 기반 쇼핑몰은 품절 시
+    <span class="purchase__btns"><button disabled>구매불가</button></span> 형태로 렌더링됨)"""
+    candidates = soup.select(BUY_BUTTON_SELECTOR)
+
+    name = None
+    og_title = soup.find("meta", property="og:title")
+    if og_title and og_title.get("content"):
+        name = og_title["content"].strip()
+    elif soup.title and soup.title.string:
+        name = soup.title.string.strip()
+
+    if not candidates:
+        return None, name
+
+    out_found = False
+    in_found = False
+    for el in candidates:
+        text = el.get_text(strip=True)
+        if not text:
+            continue
+
+        inner_btn = el if el.name == "button" else el.find("button")
+        is_disabled = bool(inner_btn and inner_btn.has_attr("disabled"))
+
+        if any(marker in text for marker in OUT_OF_STOCK_BUTTON_TEXT):
+            out_found = True
+        elif not is_disabled and any(marker in text for marker in IN_STOCK_BUTTON_TEXT):
+            in_found = True
+
+    if out_found and not in_found:
+        return STATUS_OUT_OF_STOCK, name
+    if in_found and not out_found:
+        return STATUS_IN_STOCK, name
+    return None, name
+
+
 def create_browser_context(playwright):
     """헤드리스 크로미움을 띄우고, 실제 브라우저처럼 보이도록 설정된
     컨텍스트를 만든다. (browser, context) 를 반환한다."""
@@ -276,8 +337,12 @@ def check_link(context, url: str):
 
     status, name = extract_via_next_data(soup)
     if status is None:
+        btn_status, btn_name = extract_via_buy_button(soup)
+        status = status or btn_status
+        name = name or btn_name
+    if status is None:
         text_status, text_name = extract_via_text(soup)
-        status = status if status else text_status
+        status = status or text_status
         name = name or text_name
 
     if status is None:
