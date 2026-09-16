@@ -1,5 +1,7 @@
 # zzam-tong — 네이버스토어 재입고 모니터링
 
+[![네이버스토어 재입고 모니터링](https://github.com/Seolgyumin/zzam-tong/actions/workflows/check-stock.yml/badge.svg)](https://github.com/Seolgyumin/zzam-tong/actions/workflows/check-stock.yml)
+
 네이버스토어(스마트스토어) 상품 링크들을 7분마다 자동으로 확인해서,
 품절이었던 상품이 재입고되면 Gmail로 알림 메일을 보내주는 자동화입니다.
 
