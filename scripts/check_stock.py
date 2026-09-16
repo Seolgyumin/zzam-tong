@@ -41,11 +41,25 @@ REQUEST_HEADERS = {
     ),
     "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Referer": "https://www.naver.com/",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "same-site",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1",
+    "Connection": "keep-alive",
 }
 
 REQUEST_TIMEOUT = 20
-REQUEST_DELAY_SEC = 1.5  # 링크 사이 딜레이 (과도한 요청 방지)
+REQUEST_DELAY_SEC = 3  # 링크 사이 딜레이 (과도한 요청으로 차단되지 않도록)
+RETRY_STATUS_CODES = {429, 503}
+RETRY_WAIT_SEC = 8  # 429/503 응답을 받았을 때 재시도 전 대기 시간
 ERROR_ALERT_THRESHOLD = 20  # 연속 오류 N회 이상이면 한 번 알림 메일 발송
+
+# 세션을 재사용해서 쿠키를 유지한다 (매 요청을 새 방문자로 보이지 않게 함).
+SESSION = requests.Session()
+SESSION.headers.update(REQUEST_HEADERS)
 
 # 재고 없음(OUTOFSTOCK)으로 간주하는 네이버 statusType 값들
 OUT_OF_STOCK_STATUS_TYPES = {"OUTOFSTOCK", "SUSPENSION", "CLOSE", "DELETE", "PROHIBITION"}
@@ -197,14 +211,36 @@ def extract_via_text(soup: BeautifulSoup):
     return status, name
 
 
+def _get_with_retry(url: str):
+    """429/503(차단·과부하 추정)이면 잠깐 대기 후 한 번 더 시도한다."""
+    last_exc = None
+    for attempt in range(2):
+        try:
+            resp = SESSION.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
+        except requests.RequestException as exc:
+            last_exc = exc
+            break
+        if resp.status_code in RETRY_STATUS_CODES and attempt == 0:
+            time.sleep(RETRY_WAIT_SEC)
+            continue
+        return resp, None
+    return None, f"요청 실패: {last_exc}" if last_exc else "요청 실패"
+
+
+def warm_up_session() -> None:
+    """네이버 메인 페이지를 한 번 방문해 쿠키를 확보한다 (매 요청이 완전히 새 방문자로
+    보이지 않도록 하기 위함). 실패해도 치명적이지 않으므로 무시하고 계속 진행한다."""
+    try:
+        SESSION.get("https://www.naver.com/", timeout=REQUEST_TIMEOUT)
+    except requests.RequestException as exc:
+        log(f"세션 준비(웜업) 실패 - 계속 진행합니다: {exc}")
+
+
 def check_link(url: str):
     """반환: (status, product_name, error_message)"""
-    try:
-        resp = requests.get(
-            url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT, allow_redirects=True
-        )
-    except requests.RequestException as exc:
-        return None, None, f"요청 실패: {exc}"
+    resp, error = _get_with_retry(url)
+    if error is not None:
+        return None, None, error
 
     if resp.status_code != 200:
         return None, None, f"HTTP {resp.status_code}"
@@ -327,6 +363,8 @@ def main() -> int:
     if not links:
         log("links.txt 에 등록된 링크가 없습니다. 종료합니다.")
         return 0
+
+    warm_up_session()
 
     state = load_state()
     now_iso = datetime.now(KST).isoformat()
