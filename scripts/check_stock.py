@@ -82,12 +82,12 @@ def load_links() -> list[str]:
 
 def load_config() -> dict:
     if not CONFIG_FILE.exists():
-        return {"enabled": True, "notify_email": "0212seol@gmail.com"}
+        return {"enabled": True}
     try:
         return json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         log("config.json 파싱 실패 - 기본값 사용")
-        return {"enabled": True, "notify_email": "0212seol@gmail.com"}
+        return {"enabled": True}
 
 
 def load_state() -> dict:
@@ -226,10 +226,15 @@ def check_link(url: str):
 def send_email(subject: str, html_body: str, text_body: str, config: dict) -> bool:
     sender = os.environ.get("GMAIL_ADDRESS")
     app_password = os.environ.get("GMAIL_APP_PASSWORD")
-    recipient = os.environ.get("NOTIFY_EMAIL") or config.get("notify_email") or "0212seol@gmail.com"
+    # 받는 사람 주소는 항상 시크릿에서만 읽는다 (저장소에 이메일 주소를 남기지 않기 위함).
+    # NOTIFY_EMAIL 시크릿이 없으면 발신 계정(GMAIL_ADDRESS) 본인에게 보낸다.
+    recipient = os.environ.get("NOTIFY_EMAIL") or sender
 
     if not sender or not app_password:
         log("GMAIL_ADDRESS / GMAIL_APP_PASSWORD 시크릿이 설정되지 않아 메일을 보낼 수 없습니다.")
+        return False
+    if not recipient:
+        log("받는 사람 주소를 확인할 수 없어 메일을 보낼 수 없습니다.")
         return False
 
     msg = MIMEMultipart("alternative")
