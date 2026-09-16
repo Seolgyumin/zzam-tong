@@ -1,1 +1,8 @@
-{}
+{
+  "https://brand.naver.com/pokemon/products/9882091987": {
+    "consecutive_errors": 1,
+    "last_checked": "2026-09-16T16:18:46.045542+09:00",
+    "last_error": "HTTP 429",
+    "url": "https://brand.naver.com/pokemon/products/9882091987"
+  }
+}
