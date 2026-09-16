@@ -1,0 +1,48 @@
+name: 네이버스토어 재입고 모니터링
+
+on:
+  schedule:
+    # 7분마다 실행 (GitHub 스케줄은 UTC 기준이며, 부하 상황에 따라 몇 분 지연될 수 있습니다)
+    - cron: "*/7 * * * *"
+  workflow_dispatch: {}   # 저장소의 Actions 탭에서 수동 실행 가능
+
+permissions:
+  contents: write
+
+concurrency:
+  group: stock-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      - name: 재고 확인 실행
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          NOTIFY_EMAIL: ${{ secrets.NOTIFY_EMAIL }}
+        run: python scripts/check_stock.py
+
+      - name: 상태 변경 시 커밋 & 푸시
+        run: |
+          git config user.name "stock-monitor-bot"
+          git config user.email "actions@users.noreply.github.com"
+          if ! git diff --quiet -- state.json; then
+            git add state.json
+            git commit -m "chore: update stock state [skip ci]"
+            git push
+          else
+            echo "state.json 변경 없음 - 커밋 생략"
+          fi
