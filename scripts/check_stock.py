@@ -9,6 +9,9 @@
 - 상태는 state.json 에 저장되고, 워크플로우(.github/workflows/check-stock.yml)가
   변경된 state.json 을 커밋/푸시함
 
+단순 HTTP 요청(requests)으로는 네이버 쪽 봇 차단(HTTP 429)에 계속 걸려서,
+실제 크로미움 브라우저(Playwright)를 헤드리스로 띄워 페이지에 접속합니다.
+
 이 스크립트는 GitHub Actions 러너(정상적인 인터넷 접근 가능 환경)에서 실행되는 것을
 전제로 작성되었습니다.
 """
@@ -24,8 +27,10 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from pathlib import Path
 
-import requests
 from bs4 import BeautifulSoup
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent.parent
 LINKS_FILE = ROOT / "links.txt"
@@ -34,32 +39,19 @@ STATE_FILE = ROOT / "state.json"
 
 KST = timezone(timedelta(hours=9))
 
-REQUEST_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.naver.com/",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "same-site",
-    "Sec-Fetch-User": "?1",
-    "Upgrade-Insecure-Requests": "1",
-    "Connection": "keep-alive",
-}
+BROWSER_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
 
-REQUEST_TIMEOUT = 20
+PAGE_NAV_TIMEOUT_MS = 30_000  # 페이지 이동 최대 대기 시간
+NETWORK_IDLE_TIMEOUT_MS = 8_000  # 네트워크가 잠잠해질 때까지 추가로 기다리는 시간
+SETTLE_WAIT_SEC = 1.5  # 클라이언트 사이드 리다이렉트/렌더링이 끝나길 기다리는 짧은 대기
+
 REQUEST_DELAY_SEC = 3  # 링크 사이 딜레이 (과도한 요청으로 차단되지 않도록)
 RETRY_STATUS_CODES = {429, 503}
-RETRY_WAIT_SEC = 8  # 429/503 응답을 받았을 때 재시도 전 대기 시간
+RETRY_WAIT_SEC = 10  # 429/503 응답을 받았을 때 재시도 전 대기 시간
 ERROR_ALERT_THRESHOLD = 20  # 연속 오류 N회 이상이면 한 번 알림 메일 발송
-
-# 세션을 재사용해서 쿠키를 유지한다 (매 요청을 새 방문자로 보이지 않게 함).
-SESSION = requests.Session()
-SESSION.headers.update(REQUEST_HEADERS)
 
 # 재고 없음(OUTOFSTOCK)으로 간주하는 네이버 statusType 값들
 OUT_OF_STOCK_STATUS_TYPES = {"OUTOFSTOCK", "SUSPENSION", "CLOSE", "DELETE", "PROHIBITION"}
@@ -211,41 +203,76 @@ def extract_via_text(soup: BeautifulSoup):
     return status, name
 
 
-def _get_with_retry(url: str):
+def create_browser_context(playwright):
+    """헤드리스 크로미움을 띄우고, 실제 브라우저처럼 보이도록 설정된
+    컨텍스트를 만든다. (browser, context) 를 반환한다."""
+    browser = playwright.chromium.launch(headless=True)
+    context = browser.new_context(
+        user_agent=BROWSER_USER_AGENT,
+        locale="ko-KR",
+        timezone_id="Asia/Seoul",
+        viewport={"width": 1280, "height": 900},
+    )
+    context.set_default_navigation_timeout(PAGE_NAV_TIMEOUT_MS)
+    return browser, context
+
+
+def warm_up_session(context) -> None:
+    """네이버 메인 페이지를 한 번 방문해 쿠키를 확보한다 (매 요청이 완전히 새 방문자로
+    보이지 않도록 하기 위함). 실패해도 치명적이지 않으므로 무시하고 계속 진행한다."""
+    page = context.new_page()
+    try:
+        page.goto("https://www.naver.com/", wait_until="domcontentloaded")
+        page.wait_for_timeout(int(SETTLE_WAIT_SEC * 1000))
+    except (PlaywrightTimeoutError, PlaywrightError) as exc:
+        log(f"세션 준비(웜업) 실패 - 계속 진행합니다: {exc}")
+    finally:
+        page.close()
+
+
+def _goto_with_retry(page, url: str):
     """429/503(차단·과부하 추정)이면 잠깐 대기 후 한 번 더 시도한다."""
     last_exc = None
     for attempt in range(2):
         try:
-            resp = SESSION.get(url, timeout=REQUEST_TIMEOUT, allow_redirects=True)
-        except requests.RequestException as exc:
+            resp = page.goto(url, wait_until="domcontentloaded")
+        except (PlaywrightTimeoutError, PlaywrightError) as exc:
             last_exc = exc
             break
-        if resp.status_code in RETRY_STATUS_CODES and attempt == 0:
+        status_code = resp.status if resp is not None else None
+        if status_code in RETRY_STATUS_CODES and attempt == 0:
             time.sleep(RETRY_WAIT_SEC)
             continue
         return resp, None
     return None, f"요청 실패: {last_exc}" if last_exc else "요청 실패"
 
 
-def warm_up_session() -> None:
-    """네이버 메인 페이지를 한 번 방문해 쿠키를 확보한다 (매 요청이 완전히 새 방문자로
-    보이지 않도록 하기 위함). 실패해도 치명적이지 않으므로 무시하고 계속 진행한다."""
-    try:
-        SESSION.get("https://www.naver.com/", timeout=REQUEST_TIMEOUT)
-    except requests.RequestException as exc:
-        log(f"세션 준비(웜업) 실패 - 계속 진행합니다: {exc}")
-
-
-def check_link(url: str):
+def check_link(context, url: str):
     """반환: (status, product_name, error_message)"""
-    resp, error = _get_with_retry(url)
-    if error is not None:
-        return None, None, error
+    page = context.new_page()
+    try:
+        resp, error = _goto_with_retry(page, url)
+        if error is not None:
+            return None, None, error
 
-    if resp.status_code != 200:
-        return None, None, f"HTTP {resp.status_code}"
+        status_code = resp.status if resp is not None else None
+        if status_code is not None and status_code != 200:
+            return None, None, f"HTTP {status_code}"
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+        # 클라이언트 사이드 리다이렉트/렌더링이 끝나길 잠깐 더 기다린다.
+        try:
+            page.wait_for_load_state("networkidle", timeout=NETWORK_IDLE_TIMEOUT_MS)
+        except PlaywrightTimeoutError:
+            pass
+        page.wait_for_timeout(int(SETTLE_WAIT_SEC * 1000))
+
+        html = page.content()
+    except (PlaywrightTimeoutError, PlaywrightError) as exc:
+        return None, None, f"페이지 로드 실패: {exc}"
+    finally:
+        page.close()
+
+    soup = BeautifulSoup(html, "html.parser")
 
     status, name = extract_via_next_data(soup)
     if status is None:
@@ -364,51 +391,57 @@ def main() -> int:
         log("links.txt 에 등록된 링크가 없습니다. 종료합니다.")
         return 0
 
-    warm_up_session()
-
     state = load_state()
     now_iso = datetime.now(KST).isoformat()
 
     restocked_items = []
     newly_erroring_items = []
 
-    for url in links:
-        prev = state.get(url, {})
-        status, name, error = check_link(url)
+    with sync_playwright() as playwright:
+        browser, context = create_browser_context(playwright)
+        try:
+            warm_up_session(context)
 
-        entry = dict(prev)
-        entry["url"] = url
-        entry["last_checked"] = now_iso
-        if name:
-            entry["name"] = name
+            for url in links:
+                prev = state.get(url, {})
+                status, name, error = check_link(context, url)
 
-        if error is not None:
-            entry["consecutive_errors"] = prev.get("consecutive_errors", 0) + 1
-            entry["last_error"] = error
-            log(f"[오류] {url} -> {error} (연속 {entry['consecutive_errors']}회)")
+                entry = dict(prev)
+                entry["url"] = url
+                entry["last_checked"] = now_iso
+                if name:
+                    entry["name"] = name
 
-            if (
-                entry["consecutive_errors"] >= ERROR_ALERT_THRESHOLD
-                and not prev.get("error_notified")
-            ):
-                newly_erroring_items.append({"url": url, "error": error})
-                entry["error_notified"] = True
-            # 상태(status)는 이전 값을 유지 (섣불리 뒤집지 않음)
-        else:
-            entry["consecutive_errors"] = 0
-            entry["error_notified"] = False
-            prev_status = prev.get("status")
+                if error is not None:
+                    entry["consecutive_errors"] = prev.get("consecutive_errors", 0) + 1
+                    entry["last_error"] = error
+                    log(f"[오류] {url} -> {error} (연속 {entry['consecutive_errors']}회)")
 
-            if prev_status == STATUS_OUT_OF_STOCK and status == STATUS_IN_STOCK:
-                restocked_items.append({"url": url, "name": entry.get("name")})
-                log(f"[재입고 감지] {entry.get('name')} -> {url}")
-            else:
-                log(f"[확인] {entry.get('name') or url} -> {status}")
+                    if (
+                        entry["consecutive_errors"] >= ERROR_ALERT_THRESHOLD
+                        and not prev.get("error_notified")
+                    ):
+                        newly_erroring_items.append({"url": url, "error": error})
+                        entry["error_notified"] = True
+                    # 상태(status)는 이전 값을 유지 (섣불리 뒤집지 않음)
+                else:
+                    entry["consecutive_errors"] = 0
+                    entry["error_notified"] = False
+                    prev_status = prev.get("status")
 
-            entry["status"] = status
+                    if prev_status == STATUS_OUT_OF_STOCK and status == STATUS_IN_STOCK:
+                        restocked_items.append({"url": url, "name": entry.get("name")})
+                        log(f"[재입고 감지] {entry.get('name')} -> {url}")
+                    else:
+                        log(f"[확인] {entry.get('name') or url} -> {status}")
 
-        state[url] = entry
-        time.sleep(REQUEST_DELAY_SEC)
+                    entry["status"] = status
+
+                state[url] = entry
+                time.sleep(REQUEST_DELAY_SEC)
+        finally:
+            context.close()
+            browser.close()
 
     # 더 이상 links.txt 에 없는 링크는 상태에서 정리
     for old_url in list(state.keys()):
