@@ -10,9 +10,9 @@ GitHub 서버에서 계속 실행됩니다.
 
 ### 1. Gmail 발신용 앱 비밀번호 발급받기
 
-메일을 실제로 "보내는" 계정인 **0212seol@gmail.com** 에서 앱 비밀번호를 만들어야 합니다.
+메일을 실제로 "보내는" 데 사용할 Gmail 계정에서 앱 비밀번호를 만들어야 합니다.
 
-1. https://myaccount.google.com/security 접속 (0212seol@gmail.com 계정으로 로그인)
+1. https://myaccount.google.com/security 접속 (발신에 사용할 Gmail 계정으로 로그인)
 2. "2단계 인증"이 꺼져 있다면 먼저 켜야 앱 비밀번호를 만들 수 있습니다.
 3. https://myaccount.google.com/apppasswords 접속
 4. 앱 이름을 아무거나 입력(예: "stock-monitor") 하고 생성
@@ -20,12 +20,14 @@ GitHub 서버에서 계속 실행됩니다.
 
 ### 2. 이 저장소에 시크릿(비밀값) 등록하기
 
+이메일 주소를 포함해 모든 정보를 저장소 코드에 남기지 않고 시크릿으로만 관리합니다.
+(이 저장소는 Public이라 코드에 적힌 내용은 누구나 볼 수 있기 때문입니다.)
+
 1. 이 저장소의 GitHub 페이지에서 **Settings → Secrets and variables → Actions** 로 이동
-2. "New repository secret" 클릭 후 아래 2개를 각각 등록:
-   - `GMAIL_ADDRESS` = `0212seol@gmail.com`
-   - `GMAIL_APP_PASSWORD` = (1단계에서 발급받은 16자리 앱 비밀번호)
-3. (선택) 알림을 받을 주소를 바꾸고 싶다면 `NOTIFY_EMAIL` 이라는 시크릿을 추가로 등록하세요.
-   등록하지 않으면 기본값인 `0212seol@gmail.com` 으로 발송됩니다.
+2. "New repository secret" 클릭 후 아래 항목들을 등록:
+   - `GMAIL_ADDRESS` = 발신용 Gmail 주소 (1단계에서 앱 비밀번호를 발급받은 계정)
+   - `GMAIL_APP_PASSWORD` = 1단계에서 발급받은 16자리 앱 비밀번호
+   - `NOTIFY_EMAIL` = 알림을 **받을** 이메일 주소 (선택 — 등록하지 않으면 `GMAIL_ADDRESS`로 보낸 사람이 본인에게 발송됩니다)
 
 ### 3. 저장소 공개 범위(Public/Private) 확인 — 중요
 
@@ -58,15 +60,15 @@ https://smartstore.naver.com/다른샵/products/9876543210
 
 ```json
 {
-  "enabled": true,
-  "notify_email": "0212seol@gmail.com"
+  "enabled": true
 }
 ```
 
 - `enabled: false` 로 바꾸면 워크플로우는 계속 7분마다 실행되지만 실제 확인은 건너뜁니다
   (Actions 사용량을 완전히 아끼고 싶다면 아래 "완전히 끄기"를 이용하세요).
-- `notify_email` 을 바꾸면 알림 받을 이메일 주소를 바꿀 수 있습니다
-  (단, 시크릿에 `NOTIFY_EMAIL`을 등록해두면 그 값이 우선 적용됩니다).
+- 알림 받을 이메일 주소는 `config.json`이 아니라 **`NOTIFY_EMAIL` 시크릿**으로만 관리합니다
+  (저장소가 Public이라 `config.json`에 이메일을 적으면 누구나 볼 수 있기 때문입니다).
+  주소를 바꾸고 싶으면 Settings → Secrets and variables → Actions 에서 `NOTIFY_EMAIL` 값을 수정하세요.
 
 ### 완전히 끄기 (Actions 자체를 멈추기)
 
